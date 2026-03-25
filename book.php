@@ -1,6 +1,7 @@
 <?php
 session_start();
 require "db.php";
+date_default_timezone_set("Asia/Kolkata");
 
 if (!isset($_SESSION["user_id"])) {
     header("Location: login.php"); exit;
@@ -20,8 +21,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $time      = mysqli_real_escape_string($conn, $_POST["appointment_time"]);
     $message   = mysqli_real_escape_string($conn, trim($_POST["message"]));
 
+    // Block past date
     if ($date < date("Y-m-d")) {
         $error = "You cannot book an appointment in the past.";
+    // Block past time slots on today
+    } elseif ($date === date("Y-m-d") && $time <= date("H:i")) {
+        $error = "This time slot has already passed. Please select a future time.";
     } else {
         $check = mysqli_query($conn,
             "SELECT id FROM appointments
@@ -381,25 +386,56 @@ function loadSlots() {
 
     cont.innerHTML = '<div class="slots-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading slots...</div>';
 
+    // Use server IST time directly (no UTC conversion)
+    const serverDateStr = <?php echo json_encode(date('Y-m-d')); ?>;
+    const serverHour    = <?php echo (int)date('H'); ?>;
+    const serverMinute  = <?php echo (int)date('i'); ?>;
+    const isToday       = (date === serverDateStr);
+    const currentMin    = serverHour * 60 + serverMinute;
+
     fetch(`fetch_slots.php?doctor_id=${doctor}&date=${date}`)
         .then(r => r.json())
         .then(booked => {
-            // Generate all slots 09:00 – 17:30
+            // Generate slots 08:00 AM to 12:00 AM (midnight)
             const slots = [];
-            for (let h = 9; h <= 17; h++) {
+            for (let h = 8; h <= 23; h++) {
                 slots.push(pad(h) + ':00');
                 slots.push(pad(h) + ':30');
             }
+            slots.push('00:00'); // 12:00 AM midnight
 
             let html = '<div class="slots-wrap">';
+            let availableCount = 0;
+
             slots.forEach(slot => {
-                const isBooked = booked.includes(slot);
-                html += `<button type="button" class="slot-btn${isBooked?' booked':''}"
-                    ${isBooked?'disabled':''} onclick="selectSlot(this,'${slot}')">
-                    ${formatTime(slot)}
+                const [sh, sm]  = slot.split(':').map(Number);
+                // midnight 00:00 = 1440 mins (treat as end of day)
+                const slotMin   = (sh === 0 && sm === 0) ? 1440 : sh * 60 + sm;
+                const isBooked  = booked.includes(slot);
+                // Disable if today AND slot time <= current time (add 30min buffer)
+                const isPast    = isToday && (slotMin <= currentMin);
+                const disabled  = isBooked || isPast;
+
+                if (!disabled) availableCount++;
+
+                let cls = 'slot-btn';
+                let label = formatTime(slot);
+                if (isBooked)     { cls += ' booked'; label += '<br><small style="font-size:10px;">Booked</small>'; }
+                else if (isPast)  { cls += ' booked'; label += '<br><small style="font-size:10px;">Passed</small>'; }
+
+                html += `<button type="button" class="${cls}"
+                    ${disabled?'disabled':''} onclick="selectSlot(this,'${slot}')">
+                    ${label}
                 </button>`;
             });
             html += '</div>';
+
+            if (availableCount === 0) {
+                html = `<div class="slots-loading" style="color:#e53935;">
+                    <i class="fa-solid fa-calendar-xmark"></i> No available slots for this date. Please choose another date.
+                </div>`;
+            }
+
             cont.innerHTML = html;
         })
         .catch(() => {
